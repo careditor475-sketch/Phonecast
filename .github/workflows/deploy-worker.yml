@@ -1,4 +1,4 @@
-name: Deploy relay and viewer to Cloudflare
+namename: Deploy relay and viewer to Cloudflare
 
 on:
   push:
@@ -16,4 +16,5 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: worker
+          wranglerVersion: "4"
           command: deploy
