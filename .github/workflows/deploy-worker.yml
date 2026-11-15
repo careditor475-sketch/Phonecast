@@ -1,4 +1,4 @@
-namename: Deploy relay and viewer to Cloudflare
+name: Deploy relay and viewer to Cloudflare
 
 on:
   push:
