@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PhoneCast</title>
+<style>
+  :root { --bg:#0b0d12; --fg:#eef1f7; --muted:#8b93a7; --acc:#4f8cff; --card:#151922; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:18px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .center { min-height:100%; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:20px; padding:24px; text-align:center; }
+  h1 { margin:0; font-size:clamp(28px,5vw,48px); letter-spacing:-.02em; }
+  p { margin:0; color:var(--muted); max-width:34ch; }
+  input { width:min(90vw,360px); font-size:clamp(28px,6vw,44px); letter-spacing:.35em; text-align:center;
+    text-transform:uppercase; padding:14px 10px; border-radius:16px; border:2px solid #2a3142;
+    background:var(--card); color:var(--fg); outline:none; }
+  input:focus { border-color:var(--acc); }
+  button { font:inherit; font-weight:600; padding:14px 34px; border-radius:16px; border:2px solid transparent;
+    background:var(--acc); color:#fff; cursor:pointer; }
+  button:focus-visible { outline:3px solid #fff; outline-offset:3px; }
+  button.ghost { background:#222838; }
+  #stage { position:fixed; inset:0; background:#000; display:none; }
+  video { width:100%; height:100%; object-fit:contain; background:#000; }
+  #bar { position:fixed; left:0; right:0; top:0; padding:12px; display:flex; gap:10px; justify-content:center;
+    background:linear-gradient(#000a,#0000); transition:opacity .3s; }
+  #bar.hide { opacity:0; pointer-events:none; }
+  #bar button { padding:8px 18px; font-size:15px; background:#000a; border-color:#fff3; }
+  #status { position:fixed; left:0; right:0; bottom:20px; text-align:center; color:#fff; text-shadow:0 1px 6px #000; }
+</style>
+</head>
+<body>
+<div class="center" id="join">
+  <h1>PhoneCast</h1>
+  <p>Enter the code shown on your phone.</p>
+  <input id="code" maxlength="8" autocomplete="off" autocapitalize="characters" inputmode="text" placeholder="CODE" autofocus>
+  <button id="go">Watch</button>
+  <p id="err" style="color:#ff7a7a"></p>
+</div>
+
+<div id="stage">
+  <video id="v" autoplay playsinline muted></video>
+  <div id="bar">
+    <button id="fs">Fullscreen</button>
+    <button id="leave" class="ghost">Leave</button>
+  </div>
+  <div id="status">Connecting…</div>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const join = $("join"), stage = $("stage"), video = $("v"), statusEl = $("status"), bar = $("bar");
+  let ws, pc, ice = [], code = "", wantOpen = false, retry = 0, queue = Promise.resolve();
+
+  const fromUrl = (location.pathname.replace(/^\/+|\/+$/g, "") ||
+    new URLSearchParams(location.search).get("c") || "").toUpperCase();
+  if (/^[A-Z0-9]{4,12}$/.test(fromUrl)) { $("code").value = fromUrl; start(fromUrl); }
+
+  $("go").onclick = () => start($("code").value.trim().toUpperCase());
+  $("code").addEventListener("keydown", (e) => { if (e.key === "Enter") $("go").click(); });
+  $("fs").onclick = () => (document.fullscreenElement ? document.exitFullscreen() : stage.requestFullscreen?.());
+  $("leave").onclick = leave;
+
+  let hideTimer;
+  const poke = () => { bar.classList.remove("hide"); clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => bar.classList.add("hide"), 3500); };
+  ["mousemove", "touchstart", "keydown", "click"].forEach((e) => addEventListener(e, poke));
+
+  function say(t) { statusEl.textContent = t; statusEl.style.display = t ? "block" : "none"; }
+
+  async function start(c) {
+    if (!/^[A-Z0-9]{4,12}$/.test(c)) { $("err").textContent = "Enter the code from your phone."; return; }
+    code = c; wantOpen = true; $("err").textContent = "";
+    join.style.display = "none"; stage.style.display = "block"; say("Connecting…"); poke();
+    try { ice = (await (await fetch("/api/ice")).json()).iceServers; } catch { ice = [{ urls: "stun:stun.l.google.com:19302" }]; }
+    connect();
+  }
+
+  function connect() {
+    if (!wantOpen) return;
+    ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/${code}?role=viewer`);
+    ws.onopen = () => { retry = 0; say("Waiting for the phone to start casting…"); };
+    ws.onmessage = (ev) => { queue = queue.then(() => onMsg(JSON.parse(ev.data))).catch(console.error); };
+    ws.onclose = () => { if (!wantOpen) return; say("Reconnecting…"); setTimeout(connect, Math.min(5000, 800 * ++retry)); };
+  }
+
+  function newPc() {
+    if (pc) pc.close();
+    pc = new RTCPeerConnection({ iceServers: ice });
+    pc.ontrack = (e) => { video.srcObject = e.streams[0] || new MediaStream([e.track]); video.play().catch(() => {}); say(""); };
+    pc.onicecandidate = (e) => { if (e.candidate) ws.send(JSON.stringify({ type: "ice", candidate: e.candidate })); };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed") say("Connection failed. The phone may need to restart casting.");
+      if (pc.connectionState === "disconnected") say("Connection interrupted…");
+    };
+  }
+
+  async function onMsg(m) {
+    if (m.type === "offer") {
+      newPc();
+      await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
+      const a = await pc.createAnswer();
+      await pc.setLocalDescription(a);
+      ws.send(JSON.stringify({ type: "answer", sdp: a.sdp }));
+    } else if (m.type === "ice" && pc && pc.remoteDescription) {
+      try { await pc.addIceCandidate(m.candidate); } catch (e) { console.warn(e); }
+    } else if (m.type === "sender-left") { if (pc) pc.close(); video.srcObject = null; say("The phone stopped casting."); }
+    else if (m.type === "waiting" || m.type === "sender-ready") say("Waiting for the phone to start casting…");
+  }
+
+  function leave() {
+    wantOpen = false; try { ws && ws.close(); } catch {} try { pc && pc.close(); } catch {}
+    video.srcObject = null; stage.style.display = "none"; join.style.display = "flex";
+    if (location.pathname !== "/") history.replaceState(null, "", "/");
+  }
+})();
+</script>
+</body>
+</html>
